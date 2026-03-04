@@ -236,61 +236,188 @@ function SetupScreen({ roster, onStart, onRoster, onAddToRoster, onBack }) {
 function GameScreen({ players, onFinish, onAbandon }) {
   const threshold = THRESHOLDS[players.length] || 30;
   const [scores, setScores] = useState(players.map(() => 0));
-  const [rounds, setRounds] = useState([]);
+  const [rounds, setRounds] = useState([]); // flat log of all entries
+  const [roundNum, setRoundNum] = useState(1);
+  const [enteredThisRound, setEnteredThisRound] = useState(new Set());
   const [inputFor, setInputFor] = useState(null);
-  const [winner, setWinner] = useState(null);
+  const [gameResult, setGameResult] = useState(null);
+  const [tieBreak, setTieBreak] = useState(null); // winners array waiting for manual pick
+  const [mermaidPrompt, setMermaidPrompt] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
+  const checkWinCondition = (currentScores) => {
+    const overThreshold = currentScores.map(s => s >= threshold);
+    if (!overThreshold.some(Boolean)) return null;
+    const qualifiedScores = currentScores.map((s, i) => overThreshold[i] ? s : -1);
+    const maxScore = Math.max(...qualifiedScores);
+    const winners = qualifiedScores.reduce((acc, s, i) => s === maxScore ? [...acc, i] : acc, []);
+    return { winners, reason: "points" };
+  };
+
   const addScore = (idx, pts) => {
+    // Block if already entered this round
+    if (enteredThisRound.has(idx)) return;
+
     const ns = [...scores];
     ns[idx] += pts;
     setScores(ns);
-    const nr = [...rounds, { player: idx, points: pts, totals: [...ns] }];
-    setRounds(nr);
+
+    const newEntered = new Set(enteredThisRound);
+    newEntered.add(idx);
+    const newRounds = [...rounds, { player: idx, points: pts, totals: [...ns], round: roundNum }];
+    setRounds(newRounds);
+    setEnteredThisRound(newEntered);
     setInputFor(null);
-    const over = ns.map(s => s >= threshold);
-    if (over.some(Boolean)) {
-      const max = Math.max(...ns.filter((_, i) => over[i]));
-      setWinner(ns.findIndex(s => s === max));
+
+    // Round complete when all players have entered
+    if (newEntered.size === players.length) {
+      const result = checkWinCondition(ns);
+      if (result) {
+        if (result.winners.length > 1) {
+          setTieBreak(result.winners); // show tie-break picker
+        } else {
+          setGameResult(result);
+        }
+      } else {
+        // Advance round
+        setRoundNum(r => r + 1);
+        setEnteredThisRound(new Set());
+      }
     }
   };
 
   const undo = () => {
     if (!rounds.length) return;
+    const last = rounds[rounds.length - 1];
+    const newRounds = rounds.slice(0, -1);
     const rebuilt = players.map(() => 0);
-    rounds.slice(0, -1).forEach(r => { rebuilt[r.player] += r.points; });
+    newRounds.forEach(r => { rebuilt[r.player] += r.points; });
     setScores(rebuilt);
-    setRounds(r => r.slice(0, -1));
-    setWinner(null);
+    setRounds(newRounds);
+    setGameResult(null);
+    setTieBreak(null);
+    // Restore round tracking
+    const wasRoundComplete = enteredThisRound.size === 0 && last.round < roundNum;
+    if (wasRoundComplete) {
+      setRoundNum(last.round);
+      const prevEntered = new Set(newRounds.filter(r => r.round === last.round).map(r => r.player));
+      prevEntered.delete(last.player);
+      setEnteredThisRound(prevEntered);
+    } else {
+      const newEntered = new Set(enteredThisRound);
+      newEntered.delete(last.player);
+      setEnteredThisRound(newEntered);
+    }
+  };
+
+  const triggerMermaidWin = (winnerIdx) => {
+    setMermaidPrompt(false);
+    setGameResult({ winners: [winnerIdx], reason: "mermaid" });
+  };
+
+  const resolveTie = (winnerIdx) => {
+    setTieBreak(null);
+    setGameResult({ winners: [winnerIdx], reason: "points" });
   };
 
   const finishGame = () => {
-    const totalRounds = Math.ceil(rounds.length / players.length);
+    const winnerId = gameResult?.winners.length === 1 ? players[gameResult.winners[0]].id : null;
     onFinish({
       id: Date.now().toString(),
       date: new Date().toISOString(),
       players: players.map((p, i) => ({ id: p.id, name: p.name, color: p.color, emoji: p.emoji, score: scores[i] })),
-      winnerId: winner !== null ? players[winner].id : null,
+      winnerId,
+      mermaidWin: gameResult?.reason === "mermaid",
+      mermaidWinnerId: gameResult?.reason === "mermaid" ? winnerId : null,
       rounds,
-      totalRounds,
+      totalRounds: roundNum,
       threshold,
     });
   };
 
   const maxScore = Math.max(...scores);
 
-  if (winner !== null) {
+  // ── Mermaid winner picker ──
+  if (mermaidPrompt) {
+    return (
+      <div style={S.screen}>
+        <style>{FONTS}</style>
+        <div style={S.overlay}>
+          <div style={{ ...S.numpadSheet, padding: "28px 24px 44px" }}>
+            <div style={{ fontSize: 36, textAlign: "center", marginBottom: 10 }}>🧜</div>
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, fontWeight: 700, color: C.text, textAlign: "center", marginBottom: 6 }}>Mermaid Win!</div>
+            <div style={{ fontSize: 13, color: C.muted, textAlign: "center", marginBottom: 20 }}>Who collected 4 mermaids?</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+              {players.map((p, i) => (
+                <button key={p.id}
+                  style={{ ...S.playerSelectRow, borderColor: p.color, background: p.color + "15", justifyContent: "center" }}
+                  onClick={() => triggerMermaidWin(i)}
+                >
+                  <span style={{ fontSize: 20 }}>{p.emoji}</span>
+                  <span style={{ fontSize: 16, fontWeight: 600, color: p.color, fontFamily: "'DM Sans', sans-serif" }}>{p.name}</span>
+                </button>
+              ))}
+            </div>
+            <button style={S.cancelBtn} onClick={() => setMermaidPrompt(false)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Tie-break picker ──
+  if (tieBreak) {
+    return (
+      <div style={S.screen}>
+        <style>{FONTS}</style>
+        <div style={S.overlay}>
+          <div style={{ ...S.numpadSheet, padding: "28px 24px 44px" }}>
+            <div style={{ fontSize: 36, textAlign: "center", marginBottom: 10 }}>⚖️</div>
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, fontWeight: 700, color: C.text, textAlign: "center", marginBottom: 6 }}>Tie!</div>
+            <div style={{ fontSize: 13, color: C.muted, textAlign: "center", marginBottom: 20 }}>
+              Multiple players hit the threshold with equal points. Who wins by turn order?
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+              {tieBreak.map(wi => (
+                <button key={wi}
+                  style={{ ...S.playerSelectRow, borderColor: players[wi].color, background: players[wi].color + "15", justifyContent: "center" }}
+                  onClick={() => resolveTie(wi)}
+                >
+                  <span style={{ fontSize: 20 }}>{players[wi].emoji}</span>
+                  <span style={{ fontSize: 16, fontWeight: 600, color: players[wi].color, fontFamily: "'DM Sans', sans-serif" }}>{players[wi].name}</span>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 18, color: players[wi].color }}>{scores[wi]} pts</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Win screen ──
+  if (gameResult) {
+    const wi = gameResult.winners[0];
     return (
       <div style={{ ...S.screen, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px 24px" }}>
         <style>{FONTS}</style>
-        <div style={{ fontSize: 80, marginBottom: 12, filter: `drop-shadow(0 0 24px ${players[winner].color}88)` }}>{players[winner].emoji}</div>
-        <div style={{ fontSize: 11, letterSpacing: 4, textTransform: "uppercase", color: C.gold, marginBottom: 8 }}>Winner!</div>
-        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 44, fontWeight: 900, color: players[winner].color, marginBottom: 4 }}>{players[winner].name}</div>
-        <div style={{ fontSize: 18, color: C.muted, marginBottom: 36 }}>{scores[winner]} pts · {Math.ceil(rounds.length / players.length)} rounds</div>
+        <div style={{ fontSize: 80, marginBottom: 12, filter: `drop-shadow(0 0 24px ${players[wi].color}88)` }}>
+          {gameResult.reason === "mermaid" ? "🧜" : players[wi].emoji}
+        </div>
+        <div style={{ fontSize: 11, letterSpacing: 4, textTransform: "uppercase", color: C.gold, marginBottom: 8 }}>
+          {gameResult.reason === "mermaid" ? "Mermaid Win!" : "Winner!"}
+        </div>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 44, fontWeight: 900, color: players[wi].color, marginBottom: 4 }}>
+          {players[wi].name}
+        </div>
+        {gameResult.reason === "mermaid" && (
+          <div style={{ fontSize: 14, color: C.muted, marginBottom: 4 }}>by mermaid collection</div>
+        )}
+        <div style={{ fontSize: 18, color: C.muted, marginBottom: 36 }}>{scores[wi]} pts · {roundNum} rounds</div>
         <div style={{ ...S.card, width: "100%", marginBottom: 28 }}>
           {players.map((p, i) => (
             <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < players.length - 1 ? `1px solid ${C.border}` : "none" }}>
-              <span style={{ color: i === winner ? C.gold : C.text }}>{p.emoji} {p.name}</span>
+              <span style={{ color: i === wi ? C.gold : C.text }}>{p.emoji} {p.name}</span>
               <span style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, fontWeight: 700, color: p.color }}>{scores[i]}</span>
             </div>
           ))}
@@ -300,6 +427,18 @@ function GameScreen({ players, onFinish, onAbandon }) {
     );
   }
 
+  // ── Active game ──
+  // Compute leader/trailer only when all scores > 0 (at least one round done)
+  const anyScored = scores.some(s => s > 0);
+  const maxScoreVal = Math.max(...scores);
+  const minScoreVal = Math.min(...scores);
+  const leadersCount = scores.filter(s => s === maxScoreVal).length;
+  const trailersCount = scores.filter(s => s === minScoreVal).length;
+  const allTied = maxScoreVal === minScoreVal;
+  // Only show indicators if scores differ at all
+  const showLeader = anyScored && !allTied && leadersCount === 1;
+  const showTrailer = anyScored && !allTied && trailersCount === 1;
+
   return (
     <div style={S.screen}>
       <style>{FONTS}</style>
@@ -308,37 +447,61 @@ function GameScreen({ players, onFinish, onAbandon }) {
       )}
       <div style={S.topBar}>
         <button style={S.backBtn} onClick={onAbandon}>✕</button>
-        <span style={S.topBarTitle}>Round {Math.floor(rounds.length / players.length) + 1}</span>
+        <span style={S.topBarTitle}>Round {roundNum}</span>
         <div style={{ display: "flex", gap: 6 }}>
+          <button style={{ ...S.iconBtn, fontSize: 18 }} onClick={() => setMermaidPrompt(true)} title="Mermaid win">🧜</button>
           <button style={S.iconBtn} onClick={() => setShowHistory(h => !h)}>📜</button>
           <button style={S.iconBtn} onClick={undo}>↩</button>
         </div>
       </div>
       <div style={{ padding: "4px 20px 8px", fontSize: 12, color: C.muted }}>
-        Win at <b style={{ color: C.accent }}>{threshold}</b> pts
+        Win at <b style={{ color: C.accent }}>{threshold}</b> pts ·{" "}
+        <span style={{ color: enteredThisRound.size > 0 ? C.accent : C.muted }}>
+          {enteredThisRound.size}/{players.length} entered
+        </span>
       </div>
       <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 10 }}>
         {players.map((p, i) => {
           const pct = Math.min(scores[i] / threshold, 1);
-          const leading = scores[i] === maxScore && scores[i] > 0;
+          const hasEntered = enteredThisRound.has(i);
+          const isLeader = showLeader && scores[i] === maxScoreVal;
+          const isTrailer = showTrailer && scores[i] === minScoreVal;
           return (
-            <button key={p.id} style={{ ...S.playerCard, borderColor: leading ? p.color + "bb" : p.color + "33" }} onClick={() => setInputFor(i)}>
+            <button
+              key={p.id}
+              style={{
+                ...S.playerCard,
+                borderColor: hasEntered ? p.color + "88" : isLeader ? p.color + "cc" : p.color + "33",
+                opacity: hasEntered ? 0.6 : 1,
+                cursor: hasEntered ? "default" : "pointer",
+              }}
+              onClick={() => !hasEntered && setInputFor(i)}
+            >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 22 }}>{p.emoji}</span>
                   <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 16, fontWeight: 600, color: p.color }}>{p.name}</span>
-                  {leading && <span style={S.leadBadge}>LEAD</span>}
+                  {hasEntered && <span style={{ fontSize: 10, letterSpacing: 1.5, color: p.color, fontFamily: "'DM Mono', monospace", textTransform: "uppercase" }}>✓ done</span>}
+                  {!hasEntered && isLeader && (
+                    <span style={{ fontSize: 13, color: C.gold, lineHeight: 1 }} title="Leading">🏆+</span>
+                  )}
+                  {!hasEntered && isTrailer && (
+                    <span style={{ fontSize: 13, color: C.danger, lineHeight: 1 }} title="Trailing">🏆−</span>
+                  )}
                 </div>
                 <span style={{ fontFamily: "'Playfair Display', serif", fontSize: 38, fontWeight: 900, color: p.color, lineHeight: 1 }}>{scores[i]}</span>
               </div>
               <div style={S.progressBg}>
                 <div style={{ ...S.progressFill, width: `${pct * 100}%`, background: p.color, boxShadow: `0 0 10px ${p.color}66` }} />
               </div>
-              <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1.5, textTransform: "uppercase", marginTop: 6 }}>tap to add score</div>
+              {!hasEntered && (
+                <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1.5, textTransform: "uppercase", marginTop: 6 }}>tap to add score</div>
+              )}
             </button>
           );
         })}
       </div>
+
       {showHistory && rounds.length > 0 && (
         <div style={{ margin: "12px 16px 0", ...S.card }}>
           <div style={S.cardLabel}>Recent entries</div>
@@ -418,7 +581,12 @@ function HistoryScreen({ games, onBack, onDeleteGame }) {
                     >🗑️</button>
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  {g.mermaidWin && (
+                    <span style={{ fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: "#7dd3fc", fontFamily: "'DM Mono', monospace", display: "flex", alignItems: "center", gap: 4, marginBottom: 4, width: "100%" }}>
+                      🧜 mermaid win
+                    </span>
+                  )}
                   {g.players.map(p => (
                     <div key={p.id} style={{ fontSize: 13, color: p.id === g.winnerId ? p.color : C.muted }}>
                       {p.emoji} {p.name}: <b style={{ fontFamily: "'DM Mono', monospace" }}>{p.score}</b>
@@ -451,7 +619,8 @@ function StatsScreen({ games, roster, onBack }) {
     });
     const winGames = games.filter(g => g.winnerId === p.id);
     const fastestWin = winGames.length ? Math.min(...winGames.map(g => g.totalRounds)) : null;
-    return { ...p, gamesPlayed: myGames.length, wins, avgScore, bestScore, bestRound, fastestWin };
+    const mermaidWins = games.filter(g => g.winnerId === p.id && g.mermaidWin).length;
+    return { ...p, gamesPlayed: myGames.length, wins, avgScore, bestScore, bestRound, fastestWin, mermaidWins };
   }).filter(p => p.gamesPlayed > 0).sort((a, b) => b.wins - a.wins);
 
   return (
@@ -482,6 +651,7 @@ function StatsScreen({ games, roster, onBack }) {
                 { label: "Best Score", val: p.bestScore },
                 { label: "Best Round", val: p.bestRound },
                 { label: "Fastest Win", val: p.fastestWin !== null ? `${p.fastestWin}r` : "—" },
+                ...(p.mermaidWins > 0 ? [{ label: "🧜 Wins", val: p.mermaidWins }] : []),
               ].map(({ label, val }) => (
                 <div key={label} style={{ background: C.surface, borderRadius: 10, padding: "8px 10px", textAlign: "center" }}>
                   <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 500, color: p.color }}>{val}</div>
